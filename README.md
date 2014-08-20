@@ -8,7 +8,9 @@ Usage
 =========
 
 1 Method statistic
+=========
 dexdump -j sample.dex > methodStatistic.txt
 
 2 Field statistic
+=========
 dexdump -k sample.dex > fieldStatisic.txt
