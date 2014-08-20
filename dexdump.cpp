@@ -50,6 +50,12 @@
 #include <errno.h>
 #include <assert.h>
 
+#include <map>
+#include <vector>
+#include <string>
+
+using namespace std;
+
 static const char* gProgName = "dexdump";
 
 enum OutputFormat {
@@ -69,6 +75,8 @@ struct Options {
     const char* tempFileName;
     bool exportsOnly;
     bool verbose;
+    bool displayMethodStatistics;
+    bool displayFieldStatistics;
 };
 
 struct Options gOptions;
@@ -435,6 +443,9 @@ void dumpFileHeader(const DexFile* pDexFile)
     printf("type_ids_size       : %d\n", pHeader->typeIdsSize);
     printf("type_ids_off        : %d (0x%06x)\n",
         pHeader->typeIdsOff, pHeader->typeIdsOff);
+    printf("proto_ids_size       : %d\n", pHeader->protoIdsSize);
+    printf("proto_ids_off        : %d (0x%06x)\n",
+        pHeader->protoIdsOff, pHeader->protoIdsOff);
     printf("field_ids_size      : %d\n", pHeader->fieldIdsSize);
     printf("field_ids_off       : %d (0x%06x)\n",
         pHeader->fieldIdsOff, pHeader->fieldIdsOff);
@@ -787,6 +798,7 @@ static char* indexString(DexFile* pDexFile,
                 outSize = snprintf(buf, bufSize, "%s.%s:%s // method@%0*x",
                         methInfo.classDescriptor, methInfo.name,
                         methInfo.signature, width, index);
+                free((void *) methInfo.signature);
             } else {
                 outSize = snprintf(buf, bufSize, "<method?> // method@%0*x",
                         width, index);
@@ -1069,6 +1081,7 @@ void dumpBytecodes(DexFile* pDexFile, const DexMethod* pDexMethod)
     printf("%06x:                                        |[%06x] %s.%s:%s\n",
         startAddr, startAddr,
         className, methInfo.name, methInfo.signature);
+    free((void *) methInfo.signature);
 
     insnIdx = 0;
     while (insnIdx < (int) pCode->insnsSize) {
@@ -1723,6 +1736,329 @@ void dumpRegisterMaps(DexFile* pDexFile)
     }
 }
 
+// ------------------------------------------------
+void dms_print_method(DexFile* pDexFile, const DexMethodId* pMethodId) {
+    const char* backDescriptor;
+    const char* name;
+    char* typeDescriptor = NULL;
+
+    name = dexStringById(pDexFile, pMethodId->nameIdx);
+    typeDescriptor = dexCopyDescriptorFromMethodId(pDexFile, pMethodId);
+    backDescriptor = dexStringByTypeIdx(pDexFile, pMethodId->classIdx);
+
+    printf("\t\tMethod: %s %s\n", name, typeDescriptor);
+}
+
+void dms_print_field(DexFile* pDexFile, const DexFieldId* pFieldId) {
+    const char* backDescriptor;
+    const char* name;
+    char* typeDescriptor = NULL;
+
+    name = dexStringById(pDexFile, pFieldId->nameIdx);
+    printf("\t\tField: %s\n", name);
+}
+
+struct class_method_counter {
+    int classMemberCount;   // member like method or field
+    vector<DexMethodId> methodMemberIdxVectors; 
+    class_method_counter();
+};
+
+class_method_counter::class_method_counter() {
+    classMemberCount = 0;
+}
+
+struct class_field_counter {
+    int classMemberCount;   // member like method or field
+    vector<DexFieldId> methodMemberIdxVectors; 
+    class_field_counter();
+};
+
+class_field_counter::class_field_counter() {
+    classMemberCount = 0;
+}
+
+void dumpMethodStatistics(DexFile* pDexFile) {
+
+    const DexClassDef* pClassDef;
+    DexClassData* pClassData = NULL;
+    const u1* pEncodedData;
+    const char* classDescriptor;
+    DexMethodId pMethodId;
+    const DexHeader* header = pDexFile->pHeader;
+    int idx = 0;
+    
+    map<string, bool>  class_in_dex_map;
+    // class set in dex
+    for (; idx < (int) pDexFile->pHeader->classDefsSize; idx++) {
+        pClassDef = dexGetClassDef(pDexFile, idx);
+        pEncodedData = dexGetClassData(pDexFile, pClassDef);
+        pClassData = dexReadAndVerifyClassData(&pEncodedData, NULL);
+        classDescriptor = dexStringByTypeIdx(pDexFile, pClassDef->classIdx);
+        class_in_dex_map[classDescriptor] = true;
+    }
+
+
+    int i = 0;
+    class_method_counter* counter;
+
+
+    const char* backDescriptor;
+    
+    // method's totalCount
+    int totalCount = header->methodIdsSize;  
+
+    //
+    map<string, class_method_counter>  class_namemap;
+    map<string, class_method_counter>::iterator class_map_it;
+    for (; i < totalCount; i ++) {
+        pMethodId = pDexFile->pMethodIds[i];
+        backDescriptor = dexStringByTypeIdx(pDexFile, pMethodId.classIdx);
+        class_namemap[backDescriptor].classMemberCount++;
+        class_namemap[backDescriptor].methodMemberIdxVectors.push_back(pMethodId);
+    }
+
+    class_map_it = class_namemap.begin();   
+    map<string, vector<string> > package_namemap;
+    map<string, vector<string> > package_namemap_no_dex;
+    map<string, int> package_methodCountMap;
+    string classDescriptorstring; 
+
+    for ( ; class_map_it != class_namemap.end(); class_map_it++)   
+    {   
+        classDescriptorstring = class_map_it->first;
+        classDescriptor = classDescriptorstring.c_str();
+        // ------------------------------>
+        // get package name
+        char* mangle;
+        char* lastSlash;
+        char* cp;
+
+        mangle = strdup(classDescriptor + 1);
+        mangle[strlen(mangle)-1] = '\0';
+
+        /* reduce to just the package name */
+        lastSlash = strrchr(mangle, '/');
+        if (lastSlash != NULL) {
+            *(lastSlash+1) = '\0';
+        } else {
+            *mangle = '\0';
+        }
+        //<-----------------------------------
+
+        string mangleString;   
+        mangleString.assign(&mangle[0], &mangle[strlen(mangle)]);
+
+        counter = &class_namemap[classDescriptorstring];
+        package_methodCountMap[mangleString] += counter->classMemberCount;
+
+        if (class_in_dex_map[classDescriptorstring]) {
+            package_namemap[mangleString].push_back(classDescriptorstring);
+        } else {
+            package_namemap_no_dex[mangleString].push_back(classDescriptorstring);
+        }
+    }
+
+    // // --------------- >
+    // // output
+    vector<DexMethodId>::iterator dexMethodId_it;
+    int methodCount_in_dex = 0;
+
+    printf("In Dex:\n");
+    map<string, vector<string> >::iterator package_map_it;
+    package_map_it = package_namemap.begin();   
+    for ( ; package_map_it != package_namemap.end(); package_map_it++)   
+    {   
+        printf("Package: %s %d \n", package_map_it->first.c_str(), package_methodCountMap[package_map_it->first]);
+
+        methodCount_in_dex += package_methodCountMap[package_map_it->first];
+
+        vector<string>::iterator mapvec_itor = package_map_it->second.begin();   
+        for ( ; mapvec_itor !=  package_map_it->second.end(); mapvec_itor++)   
+        {   
+            classDescriptorstring = (*mapvec_itor);
+
+             // Class: Landroid/UnusedStub; 1
+            printf("\tClass: %s %d\n", classDescriptorstring.c_str(), class_namemap[classDescriptorstring].classMemberCount);
+            vector<DexMethodId> vc = class_namemap[classDescriptorstring].methodMemberIdxVectors;
+            dexMethodId_it = vc.begin();
+            for (; dexMethodId_it != vc.end(); dexMethodId_it++) {
+                 dms_print_method(pDexFile, &(*dexMethodId_it));
+            }
+
+        }   
+    }  
+    //Total: 2145
+    printf("Total: %d\n\n\n", methodCount_in_dex); 
+
+
+    printf("Not In Dex:\n");
+    int methodCount_not_in_dex = 0;
+    package_map_it = package_namemap_no_dex.begin();   
+    for ( ; package_map_it != package_namemap_no_dex.end(); package_map_it++)   
+    {   
+        printf("Package: %s %d \n", package_map_it->first.c_str(), package_methodCountMap[package_map_it->first]);
+
+        methodCount_not_in_dex += package_methodCountMap[package_map_it->first];
+        vector<string>::iterator mapvec_itor = package_map_it->second.begin();   
+        for ( ; mapvec_itor !=  package_map_it->second.end(); mapvec_itor++)   
+        {   
+            classDescriptorstring = (*mapvec_itor);
+
+             // Class: Landroid/UnusedStub; 1
+            printf("\tClass: %s %d\n", classDescriptorstring.c_str(), class_namemap[classDescriptorstring].classMemberCount);
+            vector<DexMethodId> vc = class_namemap[classDescriptorstring].methodMemberIdxVectors;
+            dexMethodId_it = vc.begin();
+            for (; dexMethodId_it != vc.end(); dexMethodId_it++) {
+                 dms_print_method(pDexFile, &(*dexMethodId_it));
+            }
+
+        }   
+    }  
+    //Total: 2145
+    printf("Total: %d\n", methodCount_not_in_dex); 
+}
+
+
+void dumpFieldStatistics(DexFile* pDexFile) {
+    const DexClassDef* pClassDef;
+    DexClassData* pClassData = NULL;
+    const u1* pEncodedData;
+    const char* classDescriptor;
+    DexFieldId pFieldId;
+    const DexHeader* header = pDexFile->pHeader;
+    int idx = 0;
+    
+    // ------------------------------->
+    // Application Class Dex Set (exclude android application set)
+    map<string, bool>  class_in_dex_map;
+    for (; idx < (int) pDexFile->pHeader->classDefsSize; idx++) {
+        pClassDef = dexGetClassDef(pDexFile, idx);
+        pEncodedData = dexGetClassData(pDexFile, pClassDef);
+        pClassData = dexReadAndVerifyClassData(&pEncodedData, NULL);
+        classDescriptor = dexStringByTypeIdx(pDexFile, pClassDef->classIdx);
+        class_in_dex_map[classDescriptor] = true;
+    }
+
+
+    int i = 0;
+    class_field_counter* counter;
+    const char* backDescriptor;
+
+    // field's totalCount
+    int totalCount = header->fieldIdsSize;  
+
+    map<string, class_field_counter>  class_namemap;
+    map<string, class_field_counter>::iterator class_map_it;
+    for (; i < totalCount; i ++) {
+        pFieldId = pDexFile->pFieldIds[i];
+        backDescriptor = dexStringByTypeIdx(pDexFile, pFieldId.classIdx);
+        class_namemap[backDescriptor].classMemberCount++;
+        class_namemap[backDescriptor].methodMemberIdxVectors.push_back(pFieldId);
+    }
+
+    class_map_it = class_namemap.begin();   
+    map<string, vector<string> > package_namemap;
+    map<string, vector<string> > package_namemap_no_dex;
+    map<string, int> package_methodCountMap;
+    string classDescriptorstring; 
+
+    for ( ; class_map_it != class_namemap.end(); class_map_it++)   
+    {   
+        classDescriptorstring = class_map_it->first;
+        classDescriptor = classDescriptorstring.c_str();
+        // ------------------------------>
+        // get package name
+        char* mangle;
+        char* lastSlash;
+        char* cp;
+
+        mangle = strdup(classDescriptor + 1);
+        mangle[strlen(mangle)-1] = '\0';
+
+        /* reduce to just the package name */
+        lastSlash = strrchr(mangle, '/');
+        if (lastSlash != NULL) {
+            *(lastSlash+1) = '\0';
+        } else {
+            *mangle = '\0';
+        }
+        //<-----------------------------------
+
+        string mangleString;   
+        mangleString.assign(&mangle[0], &mangle[strlen(mangle)]);
+
+        counter = &class_namemap[classDescriptorstring];
+        package_methodCountMap[mangleString] += counter->classMemberCount;
+
+        if (class_in_dex_map[classDescriptorstring]) {
+            package_namemap[mangleString].push_back(classDescriptorstring);
+        } else {
+            package_namemap_no_dex[mangleString].push_back(classDescriptorstring);
+        }
+    }
+
+    // // --------------- >
+    // // output
+    vector<DexFieldId>::iterator dexMethodId_it;
+    int methodCount_in_dex = 0;
+
+    printf("In Dex:\n");
+    map<string, vector<string> >::iterator package_map_it;
+    package_map_it = package_namemap.begin();   
+    for ( ; package_map_it != package_namemap.end(); package_map_it++)   
+    {   
+        printf("Package: %s %d \n", package_map_it->first.c_str(), package_methodCountMap[package_map_it->first]);
+
+        methodCount_in_dex += package_methodCountMap[package_map_it->first];
+
+        vector<string>::iterator mapvec_itor = package_map_it->second.begin();   
+        for ( ; mapvec_itor !=  package_map_it->second.end(); mapvec_itor++)   
+        {   
+            classDescriptorstring = (*mapvec_itor);
+
+             // Class: Landroid/UnusedStub; 1
+            printf("\tClass: %s %d\n", classDescriptorstring.c_str(), class_namemap[classDescriptorstring].classMemberCount);
+            vector<DexFieldId> vc = class_namemap[classDescriptorstring].methodMemberIdxVectors;
+            dexMethodId_it = vc.begin();
+            for (; dexMethodId_it != vc.end(); dexMethodId_it++) {
+                 dms_print_field(pDexFile, &(*dexMethodId_it));
+            }
+
+        }   
+    }  
+    //Total: 2145
+    printf("Total: %d\n\n\n", methodCount_in_dex); 
+
+
+    printf("Not In Dex:\n");
+    int methodCount_not_in_dex = 0;
+    package_map_it = package_namemap_no_dex.begin();   
+    for ( ; package_map_it != package_namemap_no_dex.end(); package_map_it++)   
+    {   
+        printf("Package: %s %d \n", package_map_it->first.c_str(), package_methodCountMap[package_map_it->first]);
+
+        methodCount_not_in_dex += package_methodCountMap[package_map_it->first];
+        vector<string>::iterator mapvec_itor = package_map_it->second.begin();   
+        for ( ; mapvec_itor !=  package_map_it->second.end(); mapvec_itor++)   
+        {   
+            classDescriptorstring = (*mapvec_itor);
+
+             // Class: Landroid/UnusedStub; 1
+            printf("\tClass: %s %d\n", classDescriptorstring.c_str(), class_namemap[classDescriptorstring].classMemberCount);
+            vector<DexFieldId> vc = class_namemap[classDescriptorstring].methodMemberIdxVectors;
+            dexMethodId_it = vc.begin();
+            for (; dexMethodId_it != vc.end(); dexMethodId_it++) {
+                 dms_print_field(pDexFile, &(*dexMethodId_it));
+            }
+
+        }   
+    }  
+    //Total: 2145
+    printf("Total: %d\n", methodCount_not_in_dex); 
+}
+
+
 /*
  * Dump the requested sections of the file.
  */
@@ -1734,6 +2070,18 @@ void processDexFile(const char* fileName, DexFile* pDexFile)
     if (gOptions.verbose) {
         printf("Opened '%s', DEX version '%.3s'\n", fileName,
             pDexFile->pHeader->magic +4);
+    }
+
+    // methods
+    if (gOptions.displayMethodStatistics) {
+        dumpMethodStatistics(pDexFile);
+        return;
+    }
+
+    // fields
+    if (gOptions.displayFieldStatistics) {
+        dumpFieldStatistics(pDexFile);
+        return;
     }
 
     if (gOptions.dumpRegisterMaps) {
@@ -1760,7 +2108,7 @@ void processDexFile(const char* fileName, DexFile* pDexFile)
     if (package != NULL) {
         printf("</package>\n");
         free(package);
-    }
+    } 
 
     if (gOptions.outputFormat == OUTPUT_XML)
         printf("</api>\n");
@@ -1819,7 +2167,7 @@ void usage(void)
 {
     fprintf(stderr, "Copyright (C) 2007 The Android Open Source Project\n\n");
     fprintf(stderr,
-        "%s: [-c] [-d] [-f] [-h] [-i] [-l layout] [-m] [-t tempfile] dexfile...\n",
+        "%s: [-c] [-d] [-f] [-h] [-i] [-l layout] [-m] [-j] [-k] [-t tempfile] dexfile...\n",
         gProgName);
     fprintf(stderr, "\n");
     fprintf(stderr, " -c : verify checksum and exit\n");
@@ -1830,6 +2178,8 @@ void usage(void)
     fprintf(stderr, " -l : output layout, either 'plain' or 'xml'\n");
     fprintf(stderr, " -m : dump register maps (and nothing else)\n");
     fprintf(stderr, " -t : temp file name (defaults to /sdcard/dex-temp-*)\n");
+    fprintf(stderr, " -j : display method statistics\n" );
+    fprintf(stderr, " -k : display field statistics\n" );
 }
 
 /*
@@ -1846,10 +2196,9 @@ int main(int argc, char* const argv[])
     gOptions.verbose = true;
 
     while (1) {
-        ic = getopt(argc, argv, "cdfhil:mt:");
+        ic = getopt(argc, argv, "jkcdfhil:mt:");
         if (ic < 0)
             break;
-
         switch (ic) {
         case 'c':       // verify the checksum then exit
             gOptions.checksumOnly = true;
@@ -1882,6 +2231,12 @@ int main(int argc, char* const argv[])
             break;
         case 't':       // temp file, used when opening compressed Jar
             gOptions.tempFileName = optarg;
+            break;
+        case 'j':
+            gOptions.displayMethodStatistics = true;
+            break;
+        case 'k':
+            gOptions.displayFieldStatistics = true;
             break;
         default:
             wantUsage = true;
