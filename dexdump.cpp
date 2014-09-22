@@ -1780,6 +1780,9 @@ class_field_counter::class_field_counter() {
 
 void dumpMethodStatistics(DexFile* pDexFile) {
 
+    printf("methodIdsSize '%d', methodIdsOff '%d'\n", pDexFile->pHeader->methodIdsSize,
+            pDexFile->pHeader->methodIdsOff);
+
     const DexClassDef* pClassDef;
     DexClassData* pClassData = NULL;
     const u1* pEncodedData;
@@ -1789,6 +1792,8 @@ void dumpMethodStatistics(DexFile* pDexFile) {
     int idx = 0;
     
     map<string, bool>  class_in_dex_map;
+    map<string, class_method_counter>  class_namemap;
+
     // class set in dex
     for (; idx < (int) pDexFile->pHeader->classDefsSize; idx++) {
         pClassDef = dexGetClassDef(pDexFile, idx);
@@ -1796,8 +1801,8 @@ void dumpMethodStatistics(DexFile* pDexFile) {
         pClassData = dexReadAndVerifyClassData(&pEncodedData, NULL);
         classDescriptor = dexStringByTypeIdx(pDexFile, pClassDef->classIdx);
         class_in_dex_map[classDescriptor] = true;
+        class_namemap[classDescriptor].classMemberCount = 0;
     }
-
 
     int i = 0;
     class_method_counter* counter;
@@ -1809,7 +1814,7 @@ void dumpMethodStatistics(DexFile* pDexFile) {
     int totalCount = header->methodIdsSize;  
 
     //
-    map<string, class_method_counter>  class_namemap;
+    
     map<string, class_method_counter>::iterator class_map_it;
     for (; i < totalCount; i ++) {
         pMethodId = pDexFile->pMethodIds[i];
@@ -1822,6 +1827,7 @@ void dumpMethodStatistics(DexFile* pDexFile) {
     map<string, vector<string> > package_namemap;
     map<string, vector<string> > package_namemap_no_dex;
     map<string, int> package_methodCountMap;
+    map<string, int> package_methodCountMap_no_dex;
     string classDescriptorstring; 
 
     for ( ; class_map_it != class_namemap.end(); class_map_it++)   
@@ -1834,28 +1840,51 @@ void dumpMethodStatistics(DexFile* pDexFile) {
         char* lastSlash;
         char* cp;
 
-        mangle = strdup(classDescriptor + 1);
-        mangle[strlen(mangle)-1] = '\0';
+        // Scene : array 
+        // .e.g [Lcom/tencent/mm/p/n --> com/tencent/mm/p/n
+        if (classDescriptor[0] == '[') {
+            mangle = strdup(classDescriptor + 2);
+             /* reduce to just the package name */
+            lastSlash = strrchr(mangle, '/');
+            if (lastSlash != NULL) {
+                *(lastSlash+2) = '\0';
+            } else {
+                *mangle = '<default>\0';
+            }
 
-        /* reduce to just the package name */
-        lastSlash = strrchr(mangle, '/');
-        if (lastSlash != NULL) {
-            *(lastSlash+1) = '\0';
-        } else {
-            *mangle = '\0';
         }
+
+        // Scene : class
+        // .e.g Lcom/tencent/mm/p/n  --> com/tencent/mm/p
+         else {
+            mangle = strdup(classDescriptor + 1);
+            mangle[strlen(mangle)-1] = '\0';
+
+            /* reduce to just the package name */
+            lastSlash = strrchr(mangle, '/');
+            if (lastSlash != NULL) {
+                *(lastSlash+1) = '\0';
+            } else {
+                *mangle = '<default>\0';
+            }
+        }
+
+        if (strcmp(mangle, "") == 0) {
+            *mangle = '<default>\0';
+        }
+       
         //<-----------------------------------
 
-        string mangleString;   
-        mangleString.assign(&mangle[0], &mangle[strlen(mangle)]);
-
-        counter = &class_namemap[classDescriptorstring];
-        package_methodCountMap[mangleString] += counter->classMemberCount;
+        string packageName;   
+        packageName.assign(&mangle[0], &mangle[strlen(mangle)]);
+        counter = &class_namemap[classDescriptorstring];       
 
         if (class_in_dex_map[classDescriptorstring]) {
-            package_namemap[mangleString].push_back(classDescriptorstring);
+            package_methodCountMap[packageName] += counter->classMemberCount;
+            package_namemap[packageName].push_back(classDescriptorstring);
         } else {
-            package_namemap_no_dex[mangleString].push_back(classDescriptorstring);
+            package_methodCountMap_no_dex[packageName] += counter->classMemberCount;
+            package_namemap_no_dex[packageName].push_back(classDescriptorstring);
         }
     }
 
@@ -1879,13 +1908,14 @@ void dumpMethodStatistics(DexFile* pDexFile) {
             classDescriptorstring = (*mapvec_itor);
 
              // Class: Landroid/UnusedStub; 1
+            
             printf("\tClass: %s %d\n", classDescriptorstring.c_str(), class_namemap[classDescriptorstring].classMemberCount);
             vector<DexMethodId> vc = class_namemap[classDescriptorstring].methodMemberIdxVectors;
             dexMethodId_it = vc.begin();
             for (; dexMethodId_it != vc.end(); dexMethodId_it++) {
-                 dms_print_method(pDexFile, &(*dexMethodId_it));
+                dms_print_method(pDexFile, &(*dexMethodId_it));
             }
-
+            
         }   
     }  
     //Total: 2145
@@ -1897,9 +1927,9 @@ void dumpMethodStatistics(DexFile* pDexFile) {
     package_map_it = package_namemap_no_dex.begin();   
     for ( ; package_map_it != package_namemap_no_dex.end(); package_map_it++)   
     {   
-        printf("Package: %s %d \n", package_map_it->first.c_str(), package_methodCountMap[package_map_it->first]);
+        printf("Package: %s %d \n", package_map_it->first.c_str(), package_methodCountMap_no_dex[package_map_it->first]);
 
-        methodCount_not_in_dex += package_methodCountMap[package_map_it->first];
+        methodCount_not_in_dex += package_methodCountMap_no_dex[package_map_it->first];
         vector<string>::iterator mapvec_itor = package_map_it->second.begin();   
         for ( ; mapvec_itor !=  package_map_it->second.end(); mapvec_itor++)   
         {   
@@ -1961,6 +1991,7 @@ void dumpFieldStatistics(DexFile* pDexFile) {
     map<string, vector<string> > package_namemap;
     map<string, vector<string> > package_namemap_no_dex;
     map<string, int> package_methodCountMap;
+    map<string, int> package_methodCountMap_no_dex;
     string classDescriptorstring; 
 
     for ( ; class_map_it != class_namemap.end(); class_map_it++)   
@@ -1989,12 +2020,12 @@ void dumpFieldStatistics(DexFile* pDexFile) {
         mangleString.assign(&mangle[0], &mangle[strlen(mangle)]);
 
         counter = &class_namemap[classDescriptorstring];
-        package_methodCountMap[mangleString] += counter->classMemberCount;
-
         if (class_in_dex_map[classDescriptorstring]) {
             package_namemap[mangleString].push_back(classDescriptorstring);
+            package_methodCountMap[mangleString] += counter->classMemberCount;
         } else {
             package_namemap_no_dex[mangleString].push_back(classDescriptorstring);
+            package_methodCountMap_no_dex[mangleString] += counter->classMemberCount;
         }
     }
 
@@ -2036,9 +2067,9 @@ void dumpFieldStatistics(DexFile* pDexFile) {
     package_map_it = package_namemap_no_dex.begin();   
     for ( ; package_map_it != package_namemap_no_dex.end(); package_map_it++)   
     {   
-        printf("Package: %s %d \n", package_map_it->first.c_str(), package_methodCountMap[package_map_it->first]);
+        printf("Package: %s %d \n", package_map_it->first.c_str(), package_methodCountMap_no_dex[package_map_it->first]);
 
-        methodCount_not_in_dex += package_methodCountMap[package_map_it->first];
+        methodCount_not_in_dex += package_methodCountMap_no_dex[package_map_it->first];
         vector<string>::iterator mapvec_itor = package_map_it->second.begin();   
         for ( ; mapvec_itor !=  package_map_it->second.end(); mapvec_itor++)   
         {   
